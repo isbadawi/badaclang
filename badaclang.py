@@ -9,6 +9,7 @@ C_TO_LLVM_TYPES = {
     'int': llvm.IntType(32)
 }
 
+
 class LlvmFunctionGenerator(C.NodeVisitor):
     def __init__(self, module):
         self.module = module
@@ -70,7 +71,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if node.type == 'string':
             return self.string_literal(node.value)
         elif node.type == 'int':
-            val = node.value
             if node.value.startswith('0x'):
                 base = 16
             elif node.value.startswith('0'):
@@ -87,8 +87,9 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         elif isinstance(node, C.ArrayRef):
             # TODO(isbadawi): Understand what's going on here...
             base = self.addr(node.name)
-            if isinstance(base.type.pointee, llvm.ArrayType):
-                base = self.ir.bitcast(base, base.type.pointee.element.as_pointer())
+            ptr_type = base.type.pointee
+            if isinstance(ptr_type, llvm.ArrayType):
+                base = self.ir.bitcast(base, ptr_type.element.as_pointer())
             else:
                 base = self.ir.load(base)
             return self.ir.gep(base, [self.expr(node.subscript)])
@@ -160,7 +161,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.position_at_end(block)
         for param, arg in zip(node.decl.type.args.params, self.function.args):
             arg.name = param.name
-            local = self.ir.alloca(self.type(param.type), name='%s.addr' % param.name)
+            local = self.ir.alloca(self.type(param.type),
+                                   name='%s.addr' % param.name)
             self.symbol_table[arg.name] = local
             self.ir.store(arg, local)
         self.visit(node.body)
@@ -178,7 +180,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             else_block = self.function.append_basic_block('if.else')
         end_block = self.function.append_basic_block('if.end')
         cond = self.expr(node.cond)
-        self.ir.cbranch(cond, then_block, else_block if else_block else end_block)
+        if_false_block = else_block if else_block else end_block
+        self.ir.cbranch(cond, then_block, if_false_block)
         self.ir.position_at_end(then_block)
         self.visit(node.iftrue)
         self.ir.branch(end_block)
@@ -249,7 +252,8 @@ def compile(ast, filename):
         if isinstance(decl, C.Decl):
             assert 'extern' in decl.storage
             assert isinstance(decl.type, C.FuncDecl)
-            llvm.Function(module, LlvmFunctionGenerator(None).type(decl.type), name=decl.name)
+            fn_type = LlvmFunctionGenerator(None).type(decl.type)
+            llvm.Function(module, fn_type, name=decl.name)
         elif isinstance(decl, C.Typedef):
             assert(False)
         elif isinstance(decl, C.FuncDef):
@@ -259,6 +263,7 @@ def compile(ast, filename):
             assert(False)
 
     return module
+
 
 def main():
     filename = sys.argv[1]
