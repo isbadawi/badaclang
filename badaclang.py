@@ -73,6 +73,8 @@ def compile(ast, filename):
             assert(False)
         elif isinstance(decl, C.FuncDef):
             func = llvm.Function(module, llvm_type(decl.decl.type), name=decl.decl.name)
+            for param, arg in zip(decl.decl.type.args.params, func.args):
+                arg.name = param.name
             compile_function_body(decl.body, func)
         else:
             assert(False)
