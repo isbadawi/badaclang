@@ -126,6 +126,14 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             self.ir.branch(end_block)
         self.ir.position_at_end(end_block)
 
+    def visit_Assignment(self, node):
+        # TODO(isbadawi): Assigment as expression...
+        assert node.op == '='
+        assert isinstance(node.lvalue, C.ID)
+        rhs = self.expr(node.rvalue)
+        lhs = self.lookup_symbol(node.lvalue.name)
+        self.ir.store(rhs, lhs)
+
     def visit_FuncCall(self, node):
         args = [self.expr(expr) for expr in node.args.exprs]
         target = self.lookup_symbol(node.name.name)
