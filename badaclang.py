@@ -133,7 +133,7 @@ def compile(ast, filename):
 
 def main():
     filename = sys.argv[1]
-    ast = parse_file(sys.argv[1], use_cpp=True)
+    ast = parse_file(filename, use_cpp=True)
     module = compile(ast, filename)
     print(module)
 
