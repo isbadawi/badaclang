@@ -53,6 +53,16 @@ def llvm_constant(c_constant, module):
     c_constant.show()
     assert(0)
 
+def llvm_expr(expr, ir, module):
+    if isinstance(expr, C.Constant):
+        return llvm_constant(expr, module)
+    if isinstance(expr, C.BinaryOp):
+        lhs = llvm_expr(expr.left, ir, module)
+        rhs = llvm_expr(expr.right, ir, module)
+        if expr.op == '+':
+            return ir.add(lhs, rhs)
+    expr.show()
+    assert(False)
 
 def compile_function_body(c_body, llvm_func):
     module = llvm_func.parent
@@ -61,13 +71,7 @@ def compile_function_body(c_body, llvm_func):
     ir.position_at_end(block)
     for stmt in c_body.block_items:
         if isinstance(stmt, C.FuncCall):
-            args = []
-            for expr in stmt.args.exprs:
-                if isinstance(expr, C.Constant):
-                    args.append(llvm_constant(expr, module))
-                else:
-                    expr.show()
-                    assert(False)
+            args = [llvm_expr(expr, ir, module) for expr in stmt.args.exprs]
             callee = stmt.name.name
             func = module.get_global(callee)
             ir.call(func, args)
