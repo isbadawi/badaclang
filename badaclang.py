@@ -8,13 +8,33 @@ INT_TYPES = {
     'int': llvm.IntType(32)
 }
 
+next_str = [1]
+def llvm_string_literal(val, module):
+    val = val.strip('"')
+    # TODO(isbadawi): Other escape sequences
+    val = val.replace('\\n', '\n')
+    string = bytearray(val, encoding='ascii')
+    string.append(0)
+    type = llvm.ArrayType(llvm.IntType(8), len(string))
+    var = llvm.GlobalVariable(module, type, 'str%d' % next_str[0])
+    next_str[0] += 1
+    var.initializer = llvm.Constant(type, string)
+    var.global_constant = True
+    return var.bitcast(llvm.IntType(8).as_pointer())
+
 def llvm_type(c_type):
     if isinstance(c_type, C.TypeDecl):
         return llvm_type(c_type.type)
     if isinstance(c_type, C.FuncDecl):
+        vararg = False
         return_type = llvm_type(c_type.type)
-        arg_types = [llvm_type(arg.type) for arg in c_type.args.params]
-        return llvm.FunctionType(return_type, arg_types)
+        arg_types = []
+        for arg in c_type.args.params:
+            if isinstance(arg, C.EllipsisParam):
+                vararg = True
+            else:
+                arg_types.append(llvm_type(arg.type))
+        return llvm.FunctionType(return_type, arg_types, vararg)
     if isinstance(c_type, C.PtrDecl):
         return llvm_type(c_type.type).as_pointer()
     if isinstance(c_type, C.ArrayDecl):
@@ -27,13 +47,7 @@ def llvm_type(c_type):
 
 def llvm_constant(c_constant, module):
     if c_constant.type == 'string':
-        string = bytearray(c_constant.value.strip('"'), encoding='ascii')
-        string.append(0)
-        type = llvm.ArrayType(llvm.IntType(8), len(string))
-        var = llvm.GlobalVariable(module, type, 'str')
-        var.initializer = llvm.Constant(type, string)
-        var.global_constant = True
-        return var.bitcast(llvm.IntType(8).as_pointer())
+        return llvm_string_literal(c_constant.value, module)
     elif c_constant.type == 'int':
         return llvm.Constant(llvm.IntType(32), c_constant.value)
     c_constant.show()
