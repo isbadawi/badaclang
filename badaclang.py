@@ -15,7 +15,14 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.block = None
         self.ir = None
 
+        self.symbol_table = {}
+
         self.next_str = 1
+
+    def lookup_symbol(self, name):
+        if name in self.symbol_table:
+            return self.symbol_table[name]
+        return self.module.get_global(name)
 
     def type(self, node):
         if isinstance(node, C.TypeDecl):
@@ -69,8 +76,11 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             rhs = self.expr(node.right)
             if node.op == '+':
                 return self.ir.add(lhs, rhs)
+            if node.op == '-':
+                return self.ir.sub(lhs, rhs)
         if isinstance(node, C.ID):
-            print(node.name)
+            addr = self.lookup_symbol(node.name)
+            return self.ir.load(addr)
         node.show()
         assert(False)
 
@@ -78,16 +88,25 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.function = llvm.Function(self.module,
                                       self.type(node.decl.type),
                                       name=node.decl.name)
-        for param, arg in zip(node.decl.type.args.params, self.function.args):
-            arg.name = param.name
         self.block = self.function.append_basic_block(name='entry')
         self.ir = llvm.IRBuilder()
         self.ir.position_at_end(self.block)
+        for param, arg in zip(node.decl.type.args.params, self.function.args):
+            arg.name = param.name
+            local = self.ir.alloca(self.type(param.type), name='%s.addr' % param.name)
+            self.symbol_table[arg.name] = local
+            self.ir.store(arg, local)
         self.visit(node.body)
+
+    def visit_Decl(self, node):
+        local = self.ir.alloca(self.type(node.type), name=node.name)
+        self.symbol_table[node.name] = local
+        if node.init:
+            self.ir.store(self.expr(node.init), local)
 
     def visit_FuncCall(self, node):
         args = [self.expr(expr) for expr in node.args.exprs]
-        target = self.module.get_global(node.name.name)
+        target = self.lookup_symbol(node.name.name)
         self.ir.call(target, args)
 
     def visit_Return(self, node):

@@ -1,6 +1,7 @@
 extern int printf(const char *, ...);
 
 int main(int argc, char *argv[]) {
-  printf("hello, %s (%d)\n", "world", 2 + 3);
+  int x = argc;
+  printf("hello, %s (got %d arguments)\n", "world", argc + x - x);
   return 0;
 }
