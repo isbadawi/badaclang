@@ -10,6 +10,29 @@ C_TO_LLVM_TYPES = {
 }
 
 
+class LlvmModuleGenerator(C.NodeVisitor):
+    def __init__(self, filename):
+        self.module = llvm.Module(name=filename)
+
+        self.decl_name = None
+        self.decl_type = None
+
+    def visit_Decl(self, node):
+        self.decl_name = node.name
+        self.decl_type = node.type
+        self.generic_visit(node)
+
+    def visit_FuncDecl(self, node):
+        fn_type = LlvmFunctionGenerator(None).type(self.decl_type)
+        llvm.Function(self.module, fn_type, name=self.decl_name)
+        self.decl_name = None
+        self.decl_type = None
+
+    def visit_FuncDef(self, node):
+        generator = LlvmFunctionGenerator(self.module)
+        generator.visit(node)
+
+
 class LlvmFunctionGenerator(C.NodeVisitor):
     def __init__(self, module):
         self.module = module
@@ -245,31 +268,12 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.ret(self.expr(node.expr))
 
 
-def compile(ast, filename):
-    module = llvm.Module(name=filename)
-
-    for decl in ast.ext:
-        if isinstance(decl, C.Decl):
-            assert 'extern' in decl.storage
-            assert isinstance(decl.type, C.FuncDecl)
-            fn_type = LlvmFunctionGenerator(None).type(decl.type)
-            llvm.Function(module, fn_type, name=decl.name)
-        elif isinstance(decl, C.Typedef):
-            assert(False)
-        elif isinstance(decl, C.FuncDef):
-            generator = LlvmFunctionGenerator(module)
-            generator.visit(decl)
-        else:
-            assert(False)
-
-    return module
-
-
 def main():
     filename = sys.argv[1]
     ast = parse_file(filename, use_cpp=True)
-    module = compile(ast, filename)
-    print(module)
+    generator = LlvmModuleGenerator(filename)
+    generator.visit(ast)
+    print(generator.module)
 
 if __name__ == '__main__':
     main()
