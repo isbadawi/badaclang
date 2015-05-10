@@ -39,7 +39,11 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if isinstance(node, C.PtrDecl):
             return self.type(node.type).as_pointer()
         if isinstance(node, C.ArrayDecl):
-            return self.type(node.type).as_pointer()
+            if node.dim is None:
+                return self.type(node.type).as_pointer()
+            assert isinstance(node.dim, C.Constant)
+            assert node.dim.type == 'int'
+            return llvm.ArrayType(self.type(node.type), int(node.dim.value))
         if isinstance(node, C.IdentifierType):
             assert len(node.names) == 1
             name = node.names[0]
@@ -63,9 +67,24 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if node.type == 'string':
             return self.string_literal(node.value)
         elif node.type == 'int':
-            return llvm.Constant(llvm.IntType(32), node.value)
+            return llvm.Constant(llvm.IntType(32), int(node.value))
         node.show()
         assert False
+
+    def addr(self, node):
+        if isinstance(node, C.ID):
+            return self.lookup_symbol(node.name)
+        elif isinstance(node, C.ArrayRef):
+            # TODO(isbadawi): Understand what's going on here...
+            base = self.addr(node.name)
+            if isinstance(base.type.pointee, llvm.ArrayType):
+                base = self.ir.bitcast(base, base.type.pointee.element.as_pointer())
+            else:
+                base = self.ir.load(base)
+            return self.ir.gep(base, [self.expr(node.subscript)])
+        else:
+            node.show()
+            assert False
 
     def expr(self, node):
         if isinstance(node, C.Constant):
@@ -75,33 +94,45 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 val = self.expr(node.expr)
                 assert isinstance(val, llvm.Constant)
                 assert isinstance(val.type, llvm.IntType)
-                val.constant = str(int(val.constant) * -1)
+                val.constant = val.constant * -1
                 return val
+            if node.op == 'p++':
+                val = self.expr(node.expr)
+                inc = self.ir.add(val, llvm.Constant(val.type, 1))
+                self.ir.store(inc, self.addr(node.expr))
+                return (val)
             elif node.op == '&':
                 assert isinstance(node.expr, C.ID)
-                return self.lookup_symbol(node.expr.name)
+                return self.addr(node.expr)
             node.show()
             assert(False)
         if isinstance(node, C.BinaryOp):
             lhs = self.expr(node.left)
+            if node.op == '&&':
+                current_block = self.ir.block
+                rhs_block = self.function.append_basic_block('and.rhs')
+                end_block = self.function.append_basic_block('and.end')
+                self.ir.cbranch(lhs, rhs_block, end_block)
+                self.ir.position_at_end(rhs_block)
+                rhs = self.expr(node.right)
+                self.ir.branch(end_block)
+                self.ir.position_at_end(end_block)
+                phi = self.ir.phi(llvm.IntType(1))
+                phi.add_incoming(lhs, current_block)
+                phi.add_incoming(rhs, rhs_block)
+                return phi
+
             rhs = self.expr(node.right)
             if node.op == '+':
                 return self.ir.add(lhs, rhs)
             if node.op == '-':
                 return self.ir.sub(lhs, rhs)
-            if node.op == '>':
-                return self.ir.icmp_signed('>', lhs, rhs)
-            if node.op == '<':
-                return self.ir.icmp_signed('<', lhs, rhs)
-            if node.op == '!=':
-                return self.ir.icmp_signed('!=', lhs, rhs)
+            elif node.op in ['>', '<', '==', '!=']:
+                return self.ir.icmp_signed(node.op, lhs, rhs)
         if isinstance(node, C.ID):
-            addr = self.lookup_symbol(node.name)
-            return self.ir.load(addr)
+            return self.ir.load(self.addr(node))
         if isinstance(node, C.ArrayRef):
-            base = self.expr(node.name)
-            addr = self.ir.gep(base, [self.expr(node.subscript)])
-            return self.ir.load(addr)
+            return self.ir.load(self.addr(node))
         node.show()
         assert(False)
 
@@ -155,12 +186,36 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.branch(cond_block)
         self.ir.position_at_end(end_block)
 
+    def visit_For(self, node):
+        if node.init:
+            self.visit(node.init)
+        cond_block = self.function.append_basic_block('for.cond')
+        body_block = self.function.append_basic_block('for.body')
+        inc_block = self.function.append_basic_block('for.inc')
+        end_block = self.function.append_basic_block('for.end')
+
+        self.ir.branch(cond_block)
+        self.ir.position_at_end(cond_block)
+        if node.cond:
+            cond = self.expr(node.cond)
+            self.ir.cbranch(cond, body_block, end_block)
+        else:
+            self.ir.branch(body_block)
+        self.ir.position_at_end(body_block)
+        self.visit(node.stmt)
+        self.ir.branch(inc_block)
+        self.ir.position_at_end(inc_block)
+        if node.next:
+            # TODO(isbadawi): Would be nice to be able to just "visit" here.
+            self.expr(node.next)
+        self.ir.branch(cond_block)
+        self.ir.position_at_end(end_block)
+
     def visit_Assignment(self, node):
         # TODO(isbadawi): Assigment as expression...
         assert node.op == '='
-        assert isinstance(node.lvalue, C.ID)
         rhs = self.expr(node.rvalue)
-        lhs = self.lookup_symbol(node.lvalue.name)
+        lhs = self.addr(node.lvalue)
         self.ir.store(rhs, lhs)
 
     def visit_FuncCall(self, node):
