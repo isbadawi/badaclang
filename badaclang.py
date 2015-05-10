@@ -3,7 +3,8 @@ import sys
 import llvmlite.ir as llvm
 from pycparser import parse_file, c_ast as C
 
-INT_TYPES = {
+C_TO_LLVM_TYPES = {
+    'void': llvm.VoidType(),
     'char': llvm.IntType(8),
     'int': llvm.IntType(32)
 }
@@ -35,6 +36,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                     vararg = True
                 else:
                     arg_types.append(self.type(arg.type))
+            if len(arg_types) == 1 and isinstance(arg_types[0], llvm.VoidType):
+                arg_types = []
             return llvm.FunctionType(return_type, arg_types, vararg)
         if isinstance(node, C.PtrDecl):
             return self.type(node.type).as_pointer()
@@ -47,8 +50,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if isinstance(node, C.IdentifierType):
             assert len(node.names) == 1
             name = node.names[0]
-            assert name in INT_TYPES
-            return INT_TYPES[name]
+            assert name in C_TO_LLVM_TYPES
+            return C_TO_LLVM_TYPES[name]
 
     def string_literal(self, val):
         val = val.strip('"')
@@ -67,7 +70,14 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if node.type == 'string':
             return self.string_literal(node.value)
         elif node.type == 'int':
-            return llvm.Constant(llvm.IntType(32), int(node.value))
+            val = node.value
+            if node.value.startswith('0x'):
+                base = 16
+            elif node.value.startswith('0'):
+                base = 8
+            else:
+                base = 10
+            return llvm.Constant(llvm.IntType(32), int(node.value, base))
         node.show()
         assert False
 
@@ -129,6 +139,11 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 return self.ir.sub(lhs, rhs)
             elif node.op in ['>', '<', '==', '!=']:
                 return self.ir.icmp_signed(node.op, lhs, rhs)
+        if isinstance(node, C.Cast):
+            to_type = self.type(node.to_type.type)
+            assert(to_type.is_pointer)
+            val = self.expr(node.expr)
+            return self.ir.bitcast(val, to_type)
         if isinstance(node, C.ID):
             return self.ir.load(self.addr(node))
         if isinstance(node, C.ArrayRef):
