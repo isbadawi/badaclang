@@ -12,7 +12,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
     def __init__(self, module):
         self.module = module
         self.function = None
-        self.block = None
         self.ir = None
 
         self.symbol_table = {}
@@ -78,8 +77,14 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 return self.ir.add(lhs, rhs)
             if node.op == '-':
                 return self.ir.sub(lhs, rhs)
+            if node.op == '>':
+                return self.ir.icmp_signed('>', lhs, rhs)
         if isinstance(node, C.ID):
             addr = self.lookup_symbol(node.name)
+            return self.ir.load(addr)
+        if isinstance(node, C.ArrayRef):
+            base = self.expr(node.name)
+            addr = self.ir.gep(base, [self.expr(node.subscript)])
             return self.ir.load(addr)
         node.show()
         assert(False)
@@ -88,9 +93,9 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.function = llvm.Function(self.module,
                                       self.type(node.decl.type),
                                       name=node.decl.name)
-        self.block = self.function.append_basic_block(name='entry')
+        block = self.function.append_basic_block(name='entry')
         self.ir = llvm.IRBuilder()
-        self.ir.position_at_end(self.block)
+        self.ir.position_at_end(block)
         for param, arg in zip(node.decl.type.args.params, self.function.args):
             arg.name = param.name
             local = self.ir.alloca(self.type(param.type), name='%s.addr' % param.name)
@@ -103,6 +108,23 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.symbol_table[node.name] = local
         if node.init:
             self.ir.store(self.expr(node.init), local)
+
+    def visit_If(self, node):
+        then_block = self.function.append_basic_block('if.then')
+        else_block = None
+        if node.iffalse is not None:
+            else_block = self.function.append_basic_block('if.else')
+        end_block = self.function.append_basic_block('if.end')
+        cond = self.expr(node.cond)
+        self.ir.cbranch(cond, then_block, else_block if else_block else end_block)
+        self.ir.position_at_end(then_block)
+        self.visit(node.iftrue)
+        self.ir.branch(end_block)
+        if else_block:
+            self.ir.position_at_end(else_block)
+            self.visit(node.iffalse)
+            self.ir.branch(end_block)
+        self.ir.position_at_end(end_block)
 
     def visit_FuncCall(self, node):
         args = [self.expr(expr) for expr in node.args.exprs]
