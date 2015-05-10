@@ -70,6 +70,18 @@ class LlvmFunctionGenerator(C.NodeVisitor):
     def expr(self, node):
         if isinstance(node, C.Constant):
             return self.constant(node)
+        if isinstance(node, C.UnaryOp):
+            if node.op == '-':
+                val = self.expr(node.expr)
+                assert isinstance(val, llvm.Constant)
+                assert isinstance(val.type, llvm.IntType)
+                val.constant = str(int(val.constant) * -1)
+                return val
+            elif node.op == '&':
+                assert isinstance(node.expr, C.ID)
+                return self.lookup_symbol(node.expr.name)
+            node.show()
+            assert(False)
         if isinstance(node, C.BinaryOp):
             lhs = self.expr(node.left)
             rhs = self.expr(node.right)
@@ -79,6 +91,10 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 return self.ir.sub(lhs, rhs)
             if node.op == '>':
                 return self.ir.icmp_signed('>', lhs, rhs)
+            if node.op == '<':
+                return self.ir.icmp_signed('<', lhs, rhs)
+            if node.op == '!=':
+                return self.ir.icmp_signed('!=', lhs, rhs)
         if isinstance(node, C.ID):
             addr = self.lookup_symbol(node.name)
             return self.ir.load(addr)
@@ -124,6 +140,19 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             self.ir.position_at_end(else_block)
             self.visit(node.iffalse)
             self.ir.branch(end_block)
+        self.ir.position_at_end(end_block)
+
+    def visit_While(self, node):
+        cond_block = self.function.append_basic_block('while.cond')
+        body_block = self.function.append_basic_block('while.body')
+        end_block = self.function.append_basic_block('while.end')
+        self.ir.branch(cond_block)
+        self.ir.position_at_end(cond_block)
+        cond = self.expr(node.cond)
+        self.ir.cbranch(cond, body_block, end_block)
+        self.ir.position_at_end(body_block)
+        self.visit(node.stmt)
+        self.ir.branch(cond_block)
         self.ir.position_at_end(end_block)
 
     def visit_Assignment(self, node):
