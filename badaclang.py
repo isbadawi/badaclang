@@ -8,76 +8,91 @@ INT_TYPES = {
     'int': llvm.IntType(32)
 }
 
-next_str = [1]
-def llvm_string_literal(val, module):
-    val = val.strip('"')
-    # TODO(isbadawi): Other escape sequences
-    val = val.replace('\\n', '\n')
-    string = bytearray(val, encoding='ascii')
-    string.append(0)
-    type = llvm.ArrayType(llvm.IntType(8), len(string))
-    var = llvm.GlobalVariable(module, type, 'str%d' % next_str[0])
-    next_str[0] += 1
-    var.initializer = llvm.Constant(type, string)
-    var.global_constant = True
-    return var.bitcast(llvm.IntType(8).as_pointer())
+class LlvmFunctionGenerator(C.NodeVisitor):
+    def __init__(self, module):
+        self.module = module
+        self.function = None
+        self.block = None
+        self.ir = None
 
-def llvm_type(c_type):
-    if isinstance(c_type, C.TypeDecl):
-        return llvm_type(c_type.type)
-    if isinstance(c_type, C.FuncDecl):
-        vararg = False
-        return_type = llvm_type(c_type.type)
-        arg_types = []
-        for arg in c_type.args.params:
-            if isinstance(arg, C.EllipsisParam):
-                vararg = True
-            else:
-                arg_types.append(llvm_type(arg.type))
-        return llvm.FunctionType(return_type, arg_types, vararg)
-    if isinstance(c_type, C.PtrDecl):
-        return llvm_type(c_type.type).as_pointer()
-    if isinstance(c_type, C.ArrayDecl):
-        return llvm_type(c_type.type).as_pointer()
-    if isinstance(c_type, C.IdentifierType):
-        assert len(c_type.names) == 1
-        name = c_type.names[0]
-        assert name in INT_TYPES
-        return INT_TYPES[name]
+        self.next_str = 1
 
-def llvm_constant(c_constant, module):
-    if c_constant.type == 'string':
-        return llvm_string_literal(c_constant.value, module)
-    elif c_constant.type == 'int':
-        return llvm.Constant(llvm.IntType(32), c_constant.value)
-    c_constant.show()
-    assert(0)
+    def type(self, node):
+        if isinstance(node, C.TypeDecl):
+            return self.type(node.type)
+        if isinstance(node, C.FuncDecl):
+            vararg = False
+            return_type = self.type(node.type)
+            arg_types = []
+            for arg in node.args.params:
+                if isinstance(arg, C.EllipsisParam):
+                    vararg = True
+                else:
+                    arg_types.append(self.type(arg.type))
+            return llvm.FunctionType(return_type, arg_types, vararg)
+        if isinstance(node, C.PtrDecl):
+            return self.type(node.type).as_pointer()
+        if isinstance(node, C.ArrayDecl):
+            return self.type(node.type).as_pointer()
+        if isinstance(node, C.IdentifierType):
+            assert len(node.names) == 1
+            name = node.names[0]
+            assert name in INT_TYPES
+            return INT_TYPES[name]
 
-def llvm_expr(expr, ir, module):
-    if isinstance(expr, C.Constant):
-        return llvm_constant(expr, module)
-    if isinstance(expr, C.BinaryOp):
-        lhs = llvm_expr(expr.left, ir, module)
-        rhs = llvm_expr(expr.right, ir, module)
-        if expr.op == '+':
-            return ir.add(lhs, rhs)
-    expr.show()
-    assert(False)
+    def string_literal(self, val):
+        val = val.strip('"')
+        # TODO(isbadawi): Other escape sequences
+        val = val.replace('\\n', '\n')
+        string = bytearray(val, encoding='ascii')
+        string.append(0)
+        type = llvm.ArrayType(llvm.IntType(8), len(string))
+        var = llvm.GlobalVariable(self.module, type, 'str%d' % self.next_str)
+        var.initializer = llvm.Constant(type, string)
+        var.global_constant = True
+        self.next_str += 1
+        return var.bitcast(llvm.IntType(8).as_pointer())
 
-def compile_function_body(c_body, llvm_func):
-    module = llvm_func.parent
-    block = llvm_func.append_basic_block(name='entry')
-    ir = llvm.IRBuilder()
-    ir.position_at_end(block)
-    for stmt in c_body.block_items:
-        if isinstance(stmt, C.FuncCall):
-            args = [llvm_expr(expr, ir, module) for expr in stmt.args.exprs]
-            callee = stmt.name.name
-            func = module.get_global(callee)
-            ir.call(func, args)
-        if isinstance(stmt, C.Return):
-            assert(isinstance(stmt.expr, C.Constant))
-            ir.ret(llvm_constant(stmt.expr, module))
+    def constant(self, node):
+        if node.type == 'string':
+            return self.string_literal(node.value)
+        elif node.type == 'int':
+            return llvm.Constant(llvm.IntType(32), node.value)
+        node.show()
+        assert False
+
+    def expr(self, node):
+        if isinstance(node, C.Constant):
+            return self.constant(node)
+        if isinstance(node, C.BinaryOp):
+            lhs = self.expr(node.left)
+            rhs = self.expr(node.right)
+            if node.op == '+':
+                return self.ir.add(lhs, rhs)
+        if isinstance(node, C.ID):
+            print(node.name)
+        node.show()
+        assert(False)
+
+    def visit_FuncDef(self, node):
+        self.function = llvm.Function(self.module,
+                                      self.type(node.decl.type),
+                                      name=node.decl.name)
+        for param, arg in zip(node.decl.type.args.params, self.function.args):
+            arg.name = param.name
+        self.block = self.function.append_basic_block(name='entry')
+        self.ir = llvm.IRBuilder()
+        self.ir.position_at_end(self.block)
+        self.visit(node.body)
+
+    def visit_FuncCall(self, node):
+        args = [self.expr(expr) for expr in node.args.exprs]
+        target = self.module.get_global(node.name.name)
+        self.ir.call(target, args)
+
+    def visit_Return(self, node):
+        self.ir.ret(self.expr(node.expr))
+
 
 def compile(ast, filename):
     module = llvm.Module(name=filename)
@@ -86,14 +101,12 @@ def compile(ast, filename):
         if isinstance(decl, C.Decl):
             assert 'extern' in decl.storage
             assert isinstance(decl.type, C.FuncDecl)
-            llvm.Function(module, llvm_type(decl.type), name=decl.name)
+            llvm.Function(module, LlvmFunctionGenerator(None).type(decl.type), name=decl.name)
         elif isinstance(decl, C.Typedef):
             assert(False)
         elif isinstance(decl, C.FuncDef):
-            func = llvm.Function(module, llvm_type(decl.decl.type), name=decl.decl.name)
-            for param, arg in zip(decl.decl.type.args.params, func.args):
-                arg.name = param.name
-            compile_function_body(decl.body, func)
+            generator = LlvmFunctionGenerator(module)
+            generator.visit(decl)
         else:
             assert(False)
 
