@@ -39,11 +39,12 @@ class LlvmModuleGenerator(C.NodeVisitor):
         if isinstance(node, C.PtrDecl):
             return self.llvm_type(node.type).as_pointer()
         if isinstance(node, C.ArrayDecl):
+            base_type = self.llvm_type(node.type)
             if node.dim is None:
-                return self.llvm_type(node.type).as_pointer()
+                return base_type.as_pointer()
             assert isinstance(node.dim, C.Constant)
             assert node.dim.type == 'int'
-            return llvm.ArrayType(self.llvm_type(node.type), int(node.dim.value))
+            return llvm.ArrayType(base_type, int(node.dim.value))
         if isinstance(node, C.IdentifierType):
             assert len(node.names) == 1
             name = node.names[0]
@@ -129,7 +130,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             return llvm.Constant(llvm.IntType(32), int(node.value, base))
         node.show()
         assert False
-
 
     def addr(self, node):
         if isinstance(node, C.ID):
@@ -319,7 +319,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
     def visit_Switch(self, node):
         case_blocks = []
         for i, case in enumerate(node.stmt.block_items):
-            case_blocks.append(self.function.append_basic_block('switch.case%s' % i))
+            block = self.function.append_basic_block('switch.case%s' % i)
+            case_blocks.append(block)
         end_block = self.function.append_basic_block('switch.end')
         switch = self.ir.switch(self.expr(node.cond), end_block)
         for i, case in enumerate(node.stmt.block_items):

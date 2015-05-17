@@ -61,7 +61,6 @@ class SymbolTableVisitor(C.NodeVisitor):
         yield scope
         self.scope = scope.parent
 
-
     def visit_Decl(self, node):
         self.scope[node.name] = node
 
@@ -79,6 +78,7 @@ class SymbolTableVisitor(C.NodeVisitor):
     def visit_Typedef(self, node):
         node.show()
         raise NotImplementedError('Typedef')
+
 
 def table(ast):
     visitor = SymbolTableVisitor()
