@@ -1,8 +1,7 @@
 from contextlib import contextmanager
-import sys
 
+import pycparser.c_ast as C
 import llvmlite.ir as llvm
-from pycparser import parse_file, c_ast as C
 
 C_TO_LLVM_TYPES = {
     'void': llvm.VoidType(),
@@ -349,12 +348,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.ret(self.expr(node.expr))
 
 
-def main():
-    filename = sys.argv[1]
-    ast = parse_file(filename, use_cpp=True)
+def llvm_module(filename, ast):
     generator = LlvmModuleGenerator(filename)
     generator.visit(ast)
-    print(generator.module)
-
-if __name__ == '__main__':
-    main()
+    return generator.module

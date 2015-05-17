@@ -1,1 +1,3 @@
 *.ll
+*.pyc
+__pycache__
