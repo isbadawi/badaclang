@@ -62,14 +62,23 @@ class SymbolTableVisitor(C.NodeVisitor):
         self.scope = scope.parent
 
     def visit_Decl(self, node):
+        if node.name is None:
+            node = node.type
+            assert isinstance(node, (C.Struct, C.Enum))
+            if isinstance(node, C.Enum):
+                for key in node.values.enumerators:
+                    self.scope[key.name] = key
         self.scope[node.name] = node
 
     def visit_FuncDef(self, node):
         self.visit_Decl(node.decl)
         with self.new_scope() as scope:
             for param in node.decl.type.args.params:
-                self.visit_Decl(param)
+                self.visit(param)
             self.visit(node.body)
+
+    def visit_StructRef(self, node):
+        self.visit(node.name)
 
     def visit_ID(self, node):
         if node.name not in self.scope:

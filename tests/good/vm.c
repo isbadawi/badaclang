@@ -1,3 +1,8 @@
+// RUN: badaclang %s -o %t.ll
+// RUN: clang %t.ll -o %t
+// RUN: %t | grep '^9$'
+extern int printf(const char*, ...);
+
 enum opcode_t {
   OPCODE_ADD,
   OPCODE_SUB,
@@ -28,5 +33,6 @@ int main(int argc, char *argv[]) {
   inst.lhs = 4;
   inst.rhs = 5;
   int result = instruction_eval(inst);
-  return result;
+  printf("%d\n", result);
+  return 0;
 }
