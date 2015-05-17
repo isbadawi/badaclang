@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 import badaclang
 
@@ -19,6 +20,12 @@ def parse_args():
 def main():
     args = parse_args()
     ast = badaclang.parser.ast(args.file)
+    try:
+        symbol_table = badaclang.symbol.table(ast)
+    except badaclang.symbol.SymbolError as e:
+        print(e)
+        sys.exit(1)
+
     module = badaclang.codegen.llvm_module(args.file, ast)
 
     with open(args.output, 'w') as f:
