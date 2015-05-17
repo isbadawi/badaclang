@@ -1,3 +1,6 @@
+// RUN: badaclang %s -o %t.ll
+// RUN: clang %t.ll -o %t
+// RUN: %t | grep '0x78 0x56 0x34 0x12'
 extern int printf(const char *, ...);
 
 int main(void) {

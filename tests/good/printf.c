@@ -1,3 +1,6 @@
+// RUN: badaclang %s -o %t.ll
+// RUN: clang %t.ll -o %t
+// RUN: %t | grep 'hello, world (got 0 arguments)'
 extern int printf(const char *, ...);
 
 int main(int argc, char *argv[]) {

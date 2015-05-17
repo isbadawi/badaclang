@@ -1,3 +1,6 @@
+// RUN: badaclang %s -o %t.ll
+// RUN: clang %t.ll -o %t
+// RUN: echo 37 | %t | grep 'Yes! You got it in 1 guesses.'
 extern int scanf(const char*, ...);
 extern int printf(const char*, ...);
 

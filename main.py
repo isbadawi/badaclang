@@ -20,10 +20,11 @@ def parse_args():
 def main():
     args = parse_args()
     ast = badaclang.parser.ast(args.file)
+
     try:
         symbol_table = badaclang.symbol.table(ast)
     except badaclang.symbol.SymbolError as e:
-        print(e)
+        print(e, file=sys.stderr)
         sys.exit(1)
 
     module = badaclang.codegen.llvm_module(args.file, ast)
