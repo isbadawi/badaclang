@@ -51,8 +51,8 @@ class SymbolTable(object):
 
 class SymbolTableVisitor(C.NodeVisitor):
     def __init__(self):
-        self.globals = SymbolTable()
-        self.scope = self.globals
+        self.scopes = {}
+        self.scope = SymbolTable()
 
     @contextmanager
     def new_scope(self):
@@ -60,6 +60,10 @@ class SymbolTableVisitor(C.NodeVisitor):
         self.scope = scope
         yield scope
         self.scope = scope.parent
+
+    def visit_FileAST(self, node):
+        self.scopes[node] = self.scope
+        self.generic_visit(node)
 
     def visit_Decl(self, node):
         if node.name is None:
@@ -76,6 +80,7 @@ class SymbolTableVisitor(C.NodeVisitor):
             for param in node.decl.type.args.params:
                 self.visit(param)
             self.visit(node.body)
+            self.scopes[node] = scope
 
     def visit_StructRef(self, node):
         self.visit(node.name)
@@ -92,4 +97,4 @@ class SymbolTableVisitor(C.NodeVisitor):
 def table(ast):
     visitor = SymbolTableVisitor()
     visitor.visit(ast)
-    return visitor.globals
+    return visitor.scopes

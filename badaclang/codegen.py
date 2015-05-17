@@ -9,51 +9,59 @@ C_TO_LLVM_TYPES = {
     'int': llvm.IntType(32)
 }
 
+def llvm_type(node, scope):
+    if isinstance(node, C.TypeDecl):
+        return llvm_type(node.type, scope)
+    if isinstance(node, C.FuncDecl):
+        vararg = False
+        return_type = llvm_type(node.type, scope)
+        arg_types = []
+        for arg in node.args.params:
+            if isinstance(arg, C.EllipsisParam):
+                vararg = True
+            else:
+                arg_types.append(llvm_type(arg.type, scope))
+        if len(arg_types) == 1 and isinstance(arg_types[0], llvm.VoidType):
+            arg_types = []
+        return llvm.FunctionType(return_type, arg_types, vararg)
+    if isinstance(node, C.PtrDecl):
+        return llvm_type(node.type, scope).as_pointer()
+    if isinstance(node, C.ArrayDecl):
+        base_type = llvm_type(node.type, scope)
+        if node.dim is None:
+            return base_type.as_pointer()
+        assert isinstance(node.dim, C.Constant)
+        assert node.dim.type == 'int'
+        return llvm.ArrayType(base_type, int(node.dim.value))
+    if isinstance(node, C.IdentifierType):
+        assert len(node.names) == 1
+        name = node.names[0]
+        assert name in C_TO_LLVM_TYPES
+        return C_TO_LLVM_TYPES[name]
+    if isinstance(node, C.Enum):
+        return llvm.IntType(32)
+    if isinstance(node, C.Struct):
+        struct = scope[node.name]
+        element_types = [llvm_type(decl.type, scope) for decl in struct.decls]
+        return llvm.LiteralStructType(element_types)
+    node.show()
+    assert(0)
+
+
 
 class LlvmModuleGenerator(C.NodeVisitor):
-    def __init__(self, filename):
+    def __init__(self, filename, scopes):
         self.module = llvm.Module(name=filename)
+        self.scopes = scopes
 
         self.decl_name = None
         self.decl_type = None
 
-        self.structs = {}
-        self.llvm_types = {}
         self.constants = {}
 
-    def llvm_type(self, node):
-        if isinstance(node, C.TypeDecl):
-            return self.llvm_type(node.type)
-        if isinstance(node, C.FuncDecl):
-            vararg = False
-            return_type = self.llvm_type(node.type)
-            arg_types = []
-            for arg in node.args.params:
-                if isinstance(arg, C.EllipsisParam):
-                    vararg = True
-                else:
-                    arg_types.append(self.llvm_type(arg.type))
-            if len(arg_types) == 1 and isinstance(arg_types[0], llvm.VoidType):
-                arg_types = []
-            return llvm.FunctionType(return_type, arg_types, vararg)
-        if isinstance(node, C.PtrDecl):
-            return self.llvm_type(node.type).as_pointer()
-        if isinstance(node, C.ArrayDecl):
-            base_type = self.llvm_type(node.type)
-            if node.dim is None:
-                return base_type.as_pointer()
-            assert isinstance(node.dim, C.Constant)
-            assert node.dim.type == 'int'
-            return llvm.ArrayType(base_type, int(node.dim.value))
-        if isinstance(node, C.IdentifierType):
-            assert len(node.names) == 1
-            name = node.names[0]
-            assert name in C_TO_LLVM_TYPES
-            return C_TO_LLVM_TYPES[name]
-        if isinstance(node, C.Enum) or isinstance(node, C.Struct):
-            return self.llvm_types[node.name]
-        node.show()
-        assert(0)
+    def visit_FileAST(self, node):
+        self.scope = self.scopes[node]
+        self.generic_visit(node)
 
     def visit_Decl(self, node):
         self.decl_name = node.name
@@ -61,48 +69,39 @@ class LlvmModuleGenerator(C.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Enum(self, node):
-        self.llvm_types[node.name] = llvm.IntType(32)
+        if node.values is None:
+            return
         for i, pair in enumerate(node.values.enumerators):
             assert pair.value is None
             self.constants[pair.name] = llvm.Constant(llvm.IntType(32), i)
 
-    def visit_Struct(self, node):
-        element_llvm_types = [self.llvm_type(decl.type) for decl in node.decls]
-        self.llvm_types[node.name] = llvm.LiteralStructType(element_llvm_types)
-        self.structs[node.name] = [decl.name for decl in node.decls]
-
     def visit_FuncDecl(self, node):
-        fn_type = self.llvm_type(self.decl_type)
+        fn_type = llvm_type(self.decl_type, self.scope)
         llvm.Function(self.module, fn_type, name=self.decl_name)
         self.decl_name = None
         self.decl_type = None
 
     def visit_FuncDef(self, node):
-        generator = LlvmFunctionGenerator(self, self.module)
+        scope = self.scopes[node]
+        generator = LlvmFunctionGenerator(self.module, scope, self.constants)
         generator.visit(node)
 
 
 class LlvmFunctionGenerator(C.NodeVisitor):
-    def __init__(self, parent, module):
-        self.parent = parent
+    def __init__(self, module, scope, constants):
         self.module = module
         self.function = None
         self.ir = None
-
-        self.symbol_table = {}
+        self.scope = scope
+        self.constants = constants
+        self.values = {}
 
         self.break_targets = []
 
         self.next_str = 1
 
     def llvm_type(self, node):
-        return self.parent.llvm_type(node)
-
-    def symbol_type(self, name):
-        return self.symbol_table[name][0]
-
-    def symbol_value(self, name):
-        return self.symbol_table[name][1]
+        return llvm_type(node, self.scope)
 
     def string_literal(self, val):
         val = val.strip('"')
@@ -133,7 +132,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
 
     def addr(self, node):
         if isinstance(node, C.ID):
-            return self.symbol_value(node.name)
+            return self.values[node.name]
         elif isinstance(node, C.ArrayRef):
             # TODO(isbadawi): Understand what's going on here...
             base = self.addr(node.name)
@@ -145,14 +144,15 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             return self.ir.gep(base, [self.expr(node.subscript)])
         elif isinstance(node, C.StructRef):
             assert node.type == '.'
-            base = self.addr(node.name)
-            type_name = self.symbol_type(node.name.name)
-            struct = self.parent.structs[type_name]
-            offset = struct.index(node.field.name)
+            decl = self.scope[node.name.name]
+            struct = self.scope[decl.type.type.name]
+            fields = [decl.name for decl in struct.decls]
+            offset = fields.index(node.field.name)
             indices = [
                 llvm.Constant(llvm.IntType(32), 0),
                 llvm.Constant(llvm.IntType(32), offset)
             ]
+            base = self.addr(node.name)
             return self.ir.gep(base, indices)
         else:
             node.show()
@@ -211,8 +211,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             val = self.expr(node.expr)
             return self.ir.bitcast(val, to_type)
         if isinstance(node, C.ID):
-            if node.name in self.parent.constants:
-                return self.parent.constants[node.name]
+            if node.name in self.constants:
+                return self.constants[node.name]
             return self.ir.load(self.addr(node))
         if isinstance(node, (C.ArrayRef, C.StructRef)):
             return self.ir.load(self.addr(node))
@@ -222,13 +222,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             return self.ir.call(target, args)
         node.show()
         assert(False)
-
-    def type_name(self, decl):
-        if isinstance(decl.type.type, (C.Struct, C.Enum)):
-            return decl.type.type.name
-        elif isinstance(decl.type.type, C.IdentifierType):
-            return decl.type.type.names[0]
-        return None
 
     def visit_FuncDef(self, node):
         self.function = llvm.Function(self.module,
@@ -241,13 +234,13 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             arg.name = param.name
             local = self.ir.alloca(self.llvm_type(param.type),
                                    name='%s.addr' % param.name)
-            self.symbol_table[arg.name] = (self.type_name(param), local)
+            self.values[arg.name] = local
             self.ir.store(arg, local)
         self.visit(node.body)
 
     def visit_Decl(self, node):
         local = self.ir.alloca(self.llvm_type(node.type), name=node.name)
-        self.symbol_table[node.name] = (self.type_name(node), local)
+        self.values[node.name] = local
         if node.init:
             self.ir.store(self.expr(node.init), local)
 
@@ -349,7 +342,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.ret(self.expr(node.expr))
 
 
-def llvm_module(filename, ast):
-    generator = LlvmModuleGenerator(filename)
+def llvm_module(filename, ast, scopes):
+    generator = LlvmModuleGenerator(filename, scopes)
     generator.visit(ast)
     return generator.module
