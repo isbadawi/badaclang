@@ -48,7 +48,6 @@ def llvm_type(node, scope):
     assert(0)
 
 
-
 class LlvmModuleGenerator(C.NodeVisitor):
     def __init__(self, filename, scopes):
         self.module = llvm.Module(name=filename)
@@ -103,33 +102,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
     def llvm_type(self, node):
         return llvm_type(node, self.scope)
 
-    def string_literal(self, val):
-        val = val.strip('"')
-        # TODO(isbadawi): Other escape sequences
-        val = val.replace('\\n', '\n')
-        string = bytearray(val, encoding='ascii')
-        string.append(0)
-        type = llvm.ArrayType(llvm.IntType(8), len(string))
-        var = llvm.GlobalVariable(self.module, type, 'str%d' % self.next_str)
-        var.initializer = llvm.Constant(type, string)
-        var.global_constant = True
-        self.next_str += 1
-        return var.bitcast(llvm.IntType(8).as_pointer())
-
-    def constant(self, node):
-        if node.type == 'string':
-            return self.string_literal(node.value)
-        elif node.type == 'int':
-            if node.value.startswith('0x'):
-                base = 16
-            elif node.value.startswith('0'):
-                base = 8
-            else:
-                base = 10
-            return llvm.Constant(llvm.IntType(32), int(node.value, base))
-        node.show()
-        assert False
-
     def addr(self, node):
         if isinstance(node, C.ID):
             return self.values[node.name]
@@ -141,7 +113,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 base = self.ir.bitcast(base, ptr_type.element.as_pointer())
             else:
                 base = self.ir.load(base)
-            return self.ir.gep(base, [self.expr(node.subscript)])
+            return self.ir.gep(base, [self.visit(node.subscript)])
         elif isinstance(node, C.StructRef):
             assert node.type == '.'
             decl = self.scope[node.name.name]
@@ -157,71 +129,6 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         else:
             node.show()
             assert False
-
-    def expr(self, node):
-        if isinstance(node, C.Constant):
-            return self.constant(node)
-        if isinstance(node, C.UnaryOp):
-            if node.op == '-':
-                val = self.expr(node.expr)
-                assert isinstance(val, llvm.Constant)
-                assert isinstance(val.type, llvm.IntType)
-                val.constant = val.constant * -1
-                return val
-            if node.op == 'p++':
-                val = self.expr(node.expr)
-                inc = self.ir.add(val, llvm.Constant(val.type, 1))
-                self.ir.store(inc, self.addr(node.expr))
-                return (val)
-            elif node.op == '&':
-                assert isinstance(node.expr, C.ID)
-                return self.addr(node.expr)
-            node.show()
-            assert(False)
-        if isinstance(node, C.BinaryOp):
-            lhs = self.expr(node.left)
-            if node.op == '&&':
-                current_block = self.ir.block
-                rhs_block = self.function.append_basic_block('and.rhs')
-                end_block = self.function.append_basic_block('and.end')
-                self.ir.cbranch(lhs, rhs_block, end_block)
-                self.ir.position_at_end(rhs_block)
-                rhs = self.expr(node.right)
-                self.ir.branch(end_block)
-                self.ir.position_at_end(end_block)
-                phi = self.ir.phi(llvm.IntType(1))
-                phi.add_incoming(lhs, current_block)
-                phi.add_incoming(rhs, rhs_block)
-                return phi
-
-            rhs = self.expr(node.right)
-            if node.op == '+':
-                return self.ir.add(lhs, rhs)
-            if node.op == '-':
-                return self.ir.sub(lhs, rhs)
-            if node.op == '*':
-                return self.ir.mul(lhs, rhs)
-            if node.op == '/':
-                return self.ir.sdiv(lhs, rhs)
-            elif node.op in ['>', '<', '==', '!=']:
-                return self.ir.icmp_signed(node.op, lhs, rhs)
-        if isinstance(node, C.Cast):
-            to_type = self.llvm_type(node.to_type.type)
-            assert(to_type.is_pointer)
-            val = self.expr(node.expr)
-            return self.ir.bitcast(val, to_type)
-        if isinstance(node, C.ID):
-            if node.name in self.constants:
-                return self.constants[node.name]
-            return self.ir.load(self.addr(node))
-        if isinstance(node, (C.ArrayRef, C.StructRef)):
-            return self.ir.load(self.addr(node))
-        if isinstance(node, C.FuncCall):
-            args = [self.expr(expr) for expr in node.args.exprs]
-            target = self.module.get_global(node.name.name)
-            return self.ir.call(target, args)
-        node.show()
-        assert(False)
 
     def visit_FuncDef(self, node):
         self.function = llvm.Function(self.module,
@@ -242,7 +149,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         local = self.ir.alloca(self.llvm_type(node.type), name=node.name)
         self.values[node.name] = local
         if node.init:
-            self.ir.store(self.expr(node.init), local)
+            self.ir.store(self.visit(node.init), local)
 
     def visit_If(self, node):
         then_block = self.function.append_basic_block('if.then')
@@ -250,7 +157,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         if node.iffalse is not None:
             else_block = self.function.append_basic_block('if.else')
         end_block = self.function.append_basic_block('if.end')
-        cond = self.expr(node.cond)
+        cond = self.visit(node.cond)
         if_false_block = else_block if else_block else end_block
         self.ir.cbranch(cond, then_block, if_false_block)
         self.ir.position_at_end(then_block)
@@ -262,13 +169,22 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             self.ir.branch(end_block)
         self.ir.position_at_end(end_block)
 
+    @contextmanager
+    def break_target(self, target):
+        self.break_targets.append(target)
+        yield
+        self.break_targets.pop()
+
+    def visit_Break(self, node):
+        self.ir.branch(self.break_targets[-1])
+
     def visit_While(self, node):
         cond_block = self.function.append_basic_block('while.cond')
         body_block = self.function.append_basic_block('while.body')
         end_block = self.function.append_basic_block('while.end')
         self.ir.branch(cond_block)
         self.ir.position_at_end(cond_block)
-        cond = self.expr(node.cond)
+        cond = self.visit(node.cond)
         self.ir.cbranch(cond, body_block, end_block)
         self.ir.position_at_end(body_block)
         self.visit(node.stmt)
@@ -286,7 +202,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.branch(cond_block)
         self.ir.position_at_end(cond_block)
         if node.cond:
-            cond = self.expr(node.cond)
+            cond = self.visit(node.cond)
             self.ir.cbranch(cond, body_block, end_block)
         else:
             self.ir.branch(body_block)
@@ -295,19 +211,9 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         self.ir.branch(inc_block)
         self.ir.position_at_end(inc_block)
         if node.next:
-            # TODO(isbadawi): Would be nice to be able to just "visit" here.
-            self.expr(node.next)
+            self.visit(node.next)
         self.ir.branch(cond_block)
         self.ir.position_at_end(end_block)
-
-    @contextmanager
-    def break_target(self, target):
-        self.break_targets.append(target)
-        yield
-        self.break_targets.pop()
-
-    def visit_Break(self, node):
-        self.ir.branch(self.break_targets[-1])
 
     def visit_Switch(self, node):
         case_blocks = []
@@ -315,9 +221,9 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             block = self.function.append_basic_block('switch.case%s' % i)
             case_blocks.append(block)
         end_block = self.function.append_basic_block('switch.end')
-        switch = self.ir.switch(self.expr(node.cond), end_block)
+        switch = self.ir.switch(self.visit(node.cond), end_block)
         for i, case in enumerate(node.stmt.block_items):
-            switch.add_case(self.expr(case.expr), case_blocks[i])
+            switch.add_case(self.visit(case.expr), case_blocks[i])
         with self.break_target(end_block):
             for i, case in enumerate(node.stmt.block_items):
                 self.ir.position_at_end(case_blocks[i])
@@ -325,22 +231,108 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                     self.visit(stmt)
         self.ir.position_at_end(end_block)
 
+    def visit_Return(self, node):
+        self.ir.ret(self.visit(node.expr))
+
     def visit_Assignment(self, node):
-        # TODO(isbadawi): Assigment as expression...
         assert node.op == '='
-        rhs = self.expr(node.rvalue)
+        rhs = self.visit(node.rvalue)
         lhs = self.addr(node.lvalue)
         self.ir.store(rhs, lhs)
+        return rhs
 
     def visit_FuncCall(self, node):
-        # TODO(ibadawi): This is duplicated in self.expr. No expr stmt?
-        args = [self.expr(expr) for expr in node.args.exprs]
+        args = [self.visit(expr) for expr in node.args.exprs]
         target = self.module.get_global(node.name.name)
-        self.ir.call(target, args)
+        return self.ir.call(target, args)
 
-    def visit_Return(self, node):
-        self.ir.ret(self.expr(node.expr))
+    def visit_Constant(self, node):
+        if node.type == 'string':
+            # TODO(isbadawi): Other escape sequences
+            val = node.value.strip('"').replace('\\n', '\n')
+            string = bytearray(val, encoding='ascii')
+            string.append(0)
+            type = llvm.ArrayType(llvm.IntType(8), len(string))
+            var = llvm.GlobalVariable(self.module, type, 'str%d' % self.next_str)
+            var.initializer = llvm.Constant(type, string)
+            var.global_constant = True
+            self.next_str += 1
+            return var.bitcast(llvm.IntType(8).as_pointer())
+        elif node.type == 'int':
+            if node.value.startswith('0x'):
+                base = 16
+            elif node.value.startswith('0'):
+                base = 8
+            else:
+                base = 10
+            return llvm.Constant(llvm.IntType(32), int(node.value, base))
+        node.show()
+        assert False
 
+    def visit_UnaryOp(self, node):
+        if node.op == '-':
+            val = self.visit(node.expr)
+            assert isinstance(val, llvm.Constant)
+            assert isinstance(val.type, llvm.IntType)
+            val.constant = val.constant * -1
+            return val
+        if node.op == 'p++':
+            val = self.visit(node.expr)
+            inc = self.ir.add(val, llvm.Constant(val.type, 1))
+            self.ir.store(inc, self.addr(node.expr))
+            return (val)
+        elif node.op == '&':
+            assert isinstance(node.expr, C.ID)
+            return self.addr(node.expr)
+        node.show()
+        assert(False)
+
+    def visit_BinaryOp(self, node):
+        lhs = self.visit(node.left)
+        if node.op == '&&':
+            current_block = self.ir.block
+            rhs_block = self.function.append_basic_block('and.rhs')
+            end_block = self.function.append_basic_block('and.end')
+            self.ir.cbranch(lhs, rhs_block, end_block)
+            self.ir.position_at_end(rhs_block)
+            rhs = self.visit(node.right)
+            self.ir.branch(end_block)
+            self.ir.position_at_end(end_block)
+            phi = self.ir.phi(llvm.IntType(1))
+            phi.add_incoming(lhs, current_block)
+            phi.add_incoming(rhs, rhs_block)
+            return phi
+
+        rhs = self.visit(node.right)
+        if node.op == '+':
+            return self.ir.add(lhs, rhs)
+        if node.op == '-':
+            return self.ir.sub(lhs, rhs)
+        if node.op == '*':
+            return self.ir.mul(lhs, rhs)
+        if node.op == '/':
+            return self.ir.sdiv(lhs, rhs)
+        elif node.op in ['>', '<', '==', '!=']:
+            return self.ir.icmp_signed(node.op, lhs, rhs)
+        node.show()
+        assert(False)
+
+    def visit_Cast(self, node):
+        to_type = self.llvm_type(node.to_type.type)
+        assert(to_type.is_pointer)
+        val = self.visit(node.expr)
+        return self.ir.bitcast(val, to_type)
+
+    def visit_ID(self, node):
+        if node.name in self.constants:
+            return self.constants[node.name]
+        return self.ir.load(self.addr(node))
+
+    def visit_ArrayRef(self, node):
+        return self.ir.load(self.addr(node))
+
+    def visit_StructRef(self, node):
+        return self.ir.load(self.addr(node))
 
 def llvm_module(filename, ast, scopes):
     generator = LlvmModuleGenerator(filename, scopes)
