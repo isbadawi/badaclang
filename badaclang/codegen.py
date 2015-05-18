@@ -144,12 +144,31 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             self.values[arg.name] = local
             self.ir.store(arg, local)
         self.visit(node.body)
+        self.function.blocks = [block for block in self.function.blocks
+                                if not block.name.startswith('dead')]
 
     def visit_Decl(self, node):
-        local = self.ir.alloca(self.llvm_type(node.type), name=node.name)
+        type = self.llvm_type(node.type)
+        local = self.ir.alloca(type, name=node.name)
         self.values[node.name] = local
-        if node.init:
+
+        if node.init is None:
+            return
+
+        if not isinstance(node.init, C.InitList):
             self.ir.store(self.visit(node.init), local)
+            return
+
+        # TODO(isbadawi): Generate memcpy/memset if possible.
+        assert isinstance(type, llvm.ArrayType)
+        assert len(node.init.exprs) == type.count
+        for i, expr in enumerate(node.init.exprs):
+            indices = [
+                llvm.Constant(llvm.IntType(32), 0),
+                llvm.Constant(llvm.IntType(32), i)
+            ]
+            addr = self.ir.gep(local, indices)
+            self.ir.store(self.visit(expr), addr)
 
     def visit_If(self, node):
         then_block = self.function.append_basic_block('if.then')
@@ -177,6 +196,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
 
     def visit_Break(self, node):
         self.ir.branch(self.break_targets[-1])
+        self.ir.position_at_end(self.function.append_basic_block('dead'))
 
     def visit_While(self, node):
         cond_block = self.function.append_basic_block('while.cond')
@@ -207,7 +227,8 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         else:
             self.ir.branch(body_block)
         self.ir.position_at_end(body_block)
-        self.visit(node.stmt)
+        with self.break_target(end_block):
+            self.visit(node.stmt)
         self.ir.branch(inc_block)
         self.ir.position_at_end(inc_block)
         if node.next:
@@ -233,6 +254,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
 
     def visit_Return(self, node):
         self.ir.ret(self.visit(node.expr))
+        self.ir.position_at_end(self.function.append_basic_block('dead'))
 
     def visit_Assignment(self, node):
         assert node.op == '='
@@ -244,6 +266,14 @@ class LlvmFunctionGenerator(C.NodeVisitor):
     def visit_FuncCall(self, node):
         args = [self.visit(expr) for expr in node.args.exprs]
         target = self.module.get_global(node.name.name)
+        for i, (arg, param) in enumerate(zip(args, target.args)):
+            if arg.type != param.type:
+                # Yeah...
+                assert isinstance(arg.type, llvm.ArrayType)
+                assert param.type.is_pointer
+                assert arg.type.element == param.type.pointee
+                assert isinstance(arg, llvm.LoadInstr)
+                args[i] = self.ir.bitcast(arg.operands[0], param.type)
         return self.ir.call(target, args)
 
     def visit_Constant(self, node):
@@ -276,11 +306,11 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             assert isinstance(val.type, llvm.IntType)
             val.constant = val.constant * -1
             return val
-        if node.op == 'p++':
+        if node.op in ['++', 'p++']:
             val = self.visit(node.expr)
             inc = self.ir.add(val, llvm.Constant(val.type, 1))
             self.ir.store(inc, self.addr(node.expr))
-            return (val)
+            return inc if node.op == '++' else val
         elif node.op == '&':
             assert isinstance(node.expr, C.ID)
             return self.addr(node.expr)
@@ -289,11 +319,15 @@ class LlvmFunctionGenerator(C.NodeVisitor):
 
     def visit_BinaryOp(self, node):
         lhs = self.visit(node.left)
-        if node.op == '&&':
+        if node.op in ['&&', '||']:
             current_block = self.ir.block
-            rhs_block = self.function.append_basic_block('and.rhs')
-            end_block = self.function.append_basic_block('and.end')
-            self.ir.cbranch(lhs, rhs_block, end_block)
+            prefix = 'and' if node.op == '&&' else 'or'
+            rhs_block = self.function.append_basic_block('%s.rhs' % prefix)
+            end_block = self.function.append_basic_block('%s.end' % prefix)
+            if node.op == '&&':
+                self.ir.cbranch(lhs, rhs_block, end_block)
+            else:
+                self.ir.cbranch(lhs, end_block, rhs_block)
             self.ir.position_at_end(rhs_block)
             rhs = self.visit(node.right)
             self.ir.branch(end_block)
