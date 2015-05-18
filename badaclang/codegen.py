@@ -3,10 +3,13 @@ from contextlib import contextmanager
 import pycparser.c_ast as C
 import llvmlite.ir as llvm
 
+i8 = llvm.IntType(8)
+i32 = llvm.IntType(32)
+
 C_TO_LLVM_TYPES = {
     'void': llvm.VoidType(),
-    'char': llvm.IntType(8),
-    'int': llvm.IntType(32)
+    'char': i8,
+    'int': i32
 }
 
 def llvm_type(node, scope):
@@ -39,7 +42,7 @@ def llvm_type(node, scope):
         assert name in C_TO_LLVM_TYPES
         return C_TO_LLVM_TYPES[name]
     if isinstance(node, C.Enum):
-        return llvm.IntType(32)
+        return i32
     if isinstance(node, C.Struct):
         struct = scope[node.name]
         element_types = [llvm_type(decl.type, scope) for decl in struct.decls]
@@ -72,7 +75,7 @@ class LlvmModuleGenerator(C.NodeVisitor):
             return
         for i, pair in enumerate(node.values.enumerators):
             assert pair.value is None
-            self.constants[pair.name] = llvm.Constant(llvm.IntType(32), i)
+            self.constants[pair.name] = llvm.Constant(i32, i)
 
     def visit_FuncDecl(self, node):
         fn_type = llvm_type(self.decl_type, self.scope)
@@ -120,10 +123,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             struct = self.scope[decl.type.type.name]
             fields = [decl.name for decl in struct.decls]
             offset = fields.index(node.field.name)
-            indices = [
-                llvm.Constant(llvm.IntType(32), 0),
-                llvm.Constant(llvm.IntType(32), offset)
-            ]
+            indices = [llvm.Constant(i32, 0), llvm.Constant(i32, offset)]
             base = self.addr(node.name)
             return self.ir.gep(base, indices)
         else:
@@ -163,10 +163,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
         assert isinstance(type, llvm.ArrayType)
         assert len(node.init.exprs) == type.count
         for i, expr in enumerate(node.init.exprs):
-            indices = [
-                llvm.Constant(llvm.IntType(32), 0),
-                llvm.Constant(llvm.IntType(32), i)
-            ]
+            indices = [llvm.Constant(i32, 0), llvm.Constant(i32, i)]
             addr = self.ir.gep(local, indices)
             self.ir.store(self.visit(expr), addr)
 
@@ -282,12 +279,12 @@ class LlvmFunctionGenerator(C.NodeVisitor):
             val = node.value.strip('"').replace('\\n', '\n')
             string = bytearray(val, encoding='ascii')
             string.append(0)
-            type = llvm.ArrayType(llvm.IntType(8), len(string))
+            type = llvm.ArrayType(i8, len(string))
             var = llvm.GlobalVariable(self.module, type, 'str%d' % self.next_str)
             var.initializer = llvm.Constant(type, string)
             var.global_constant = True
             self.next_str += 1
-            return var.bitcast(llvm.IntType(8).as_pointer())
+            return var.bitcast(i8.as_pointer())
         elif node.type == 'int':
             if node.value.startswith('0x'):
                 base = 16
@@ -295,7 +292,7 @@ class LlvmFunctionGenerator(C.NodeVisitor):
                 base = 8
             else:
                 base = 10
-            return llvm.Constant(llvm.IntType(32), int(node.value, base))
+            return llvm.Constant(i32, int(node.value, base))
         node.show()
         assert False
 
